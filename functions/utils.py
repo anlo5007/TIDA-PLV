@@ -1,4 +1,3 @@
-
 """
 utils.py
 ========
@@ -44,8 +43,11 @@ See Also
 scipy.signal.hilbert, scipy.signal.butter
 """
 
+import warnings
+from scipy import stats
 from scipy.signal import hilbert, butter, filtfilt
 import numpy as np
+import pandas as pd 
 from matplotlib import pyplot as plt
 
 
@@ -240,7 +242,7 @@ def dominant_frequency(signal, fs, hann=True, poly_order=4, plot=False):
 
     # Optional polynomial detrending
     if poly_order is not None:
-        signal = poly_detrend(signal, order=poly_order)
+        signal = poly_detrend(signal, order=poly_order).to_numpy()  # Convert back to ndarray if input was a Series
 
     # FFT
     fft_vals = np.fft.rfft(signal)
@@ -253,10 +255,12 @@ def dominant_frequency(signal, fs, hann=True, poly_order=4, plot=False):
     idx = np.argmax(power[1:]) + 1
 
     if plot:
+        plt.figure(figsize=(14, 6))
         plt.plot(freqs, power, alpha=0.7)
         plt.xlabel('Frequency (Hz)')
         plt.ylabel('Power')
         plt.xlim(0, 1)
+        plt.title('Power Spectrum', fontweight='bold')
 
     max_freq = freqs[idx]
     return max_freq, freqs, power, signal
@@ -317,11 +321,7 @@ def plv_einsum(phases):
     return PLV
 
 
-# =============================================================================
-# Surrogate generators
-# =============================================================================
-
-def circular_shift_surrogate(signals, min_interval, max_interval):
+def circular_shift_surrogate(signals, min_interval=None, max_interval=None):
     """
     Generate one surrogate dataset by circularly shifting each cell's signal.
 
@@ -334,13 +334,20 @@ def circular_shift_surrogate(signals, min_interval, max_interval):
     ----------
     signals : ndarray, shape (n_cells, n_timepoints)
         Bandpass-filtered signals (real-valued).
-    min_interval : int
+    min_interval : int or None, optional
         Minimum shift in samples. Should be at least one full oscillation
         cycle (i.e. ``int(fs / dominant_freq)``) to ensure the phase
-        relationship is genuinely disrupted.
-    max_interval : int
-        Maximum shift in samples. Typically set to
-        ``len(signal) - min_interval``.
+        relationship is genuinely disrupted. If None, defaults to 0.
+        Default is None.
+
+        .. warning::
+            A minimum shift of 0 allows trivial surrogates that preserve
+            the original phase relationship. For meaningful null distributions
+            set this to at least one full oscillation cycle.
+
+    max_interval : int or None, optional
+        Maximum shift in samples. If None, defaults to the number of
+        timepoints in the signal. Default is None.
 
     Returns
     -------
@@ -367,11 +374,30 @@ def circular_shift_surrogate(signals, min_interval, max_interval):
 
     Examples
     --------
-    >>> from functools import partial
-    >>> surrogate_fn = partial(circular_shift_surrogate,
-    ...                        min_interval=100, max_interval=500)
-    >>> surrogate = surrogate_fn(signals)
+    >>> # Default: shift between 0 and full trace length
+    >>> surrogate = circular_shift_surrogate(signals)
+
+    >>> # Recommended: shift by at least one oscillation cycle
+    >>> surrogate = circular_shift_surrogate(signals, min_interval=100, max_interval=500)
     """
+    n_timepoints = signals.shape[1]
+
+    if min_interval is None:
+        min_interval = 0
+        warnings.warn(
+            "min_interval not set, defaulting to 0. "
+            "A shift of 0 samples produces a surrogate identical to the original signal. ",
+            UserWarning
+        )
+    if max_interval is None:
+        max_interval = n_timepoints
+        warnings.warn(
+            f"max_interval not set, defaulting to {n_timepoints} samples (full trace length). "
+            "A shift equal to the trace length is equivalent to a shift of 0 and produces "
+            "a surrogate identical to the original signal. ",
+            UserWarning
+        )
+
     surrogate = np.empty_like(signals)
     for i in range(signals.shape[0]):
         shift = np.random.randint(min_interval, max_interval)
@@ -454,16 +480,13 @@ def phase_randomisation_surrogate(signals):
     return surrogate
 
 
-# =============================================================================
-# Significance testing
-# =============================================================================
-
 def permutation_test(
     signals,
     empirical_plv,
     surrogate_fn,
     n_permutations=1000,
     plot_surrogates=0,
+    **surrogate_kwargs
 ):
     """
     Surrogate permutation test for PLV significance.
@@ -475,6 +498,7 @@ def permutation_test(
 
     This function is agnostic to the surrogate method — any callable that
     accepts signals and returns signals of the same shape can be passed.
+    Additional keyword arguments are forwarded directly to ``surrogate_fn``.
 
     Parameters
     ----------
@@ -485,19 +509,12 @@ def permutation_test(
     empirical_plv : ndarray, shape (n_cells, n_cells)
         Observed PLV matrix computed from the real data via ``plv_einsum``.
     surrogate_fn : callable
-        Function with signature ``surrogate_fn(signals) -> surrogate_signals``
+        Function with signature ``surrogate_fn(signals, **kwargs) -> surrogate_signals``
         where ``surrogate_signals`` has the same shape as ``signals``.
-        Use ``circular_shift_surrogate`` or ``phase_randomisation_surrogate``,
-        wrapping with ``functools.partial`` if extra arguments are needed::
-
-            from functools import partial
-            surrogate_fn = partial(circular_shift_surrogate,
-                                   min_interval=100, max_interval=500)
-
-        For phase randomisation (no extra arguments needed)::
-
-            surrogate_fn = phase_randomisation_surrogate
-
+        Built-in options are ``circular_shift_surrogate`` and
+        ``phase_randomisation_surrogate``. Any additional keyword arguments
+        required by ``surrogate_fn`` should be passed directly to
+        ``permutation_test`` as keyword arguments (see ``**surrogate_kwargs``).
     n_permutations : int, optional
         Number of surrogate datasets to generate. Default is 1000.
         Higher values give more precise p-values but increase runtime linearly.
@@ -506,6 +523,19 @@ def permutation_test(
         The empirical signals are plotted first in red, followed by the
         first ``plot_surrogates`` surrogates in blue, one figure each.
         Set to 0 to disable all plotting. Default is 0.
+    **surrogate_kwargs
+        Additional keyword arguments forwarded to ``surrogate_fn``.
+
+        For ``circular_shift_surrogate``:
+
+        - ``min_interval`` (int) – minimum shift in samples. Should be at
+          least one full oscillation cycle (``int(fs / dominant_freq)``).
+          Defaults to 0 if not provided.
+        - ``max_interval`` (int) – maximum shift in samples. Defaults to
+          the full trace length if not provided.
+
+        For ``phase_randomisation_surrogate``:
+            No additional arguments required.
 
     Returns
     -------
@@ -516,21 +546,18 @@ def permutation_test(
         Proportion of surrogates with PLV >= empirical PLV, with continuity
         correction: ``p = (count + 1) / (n_permutations + 1)``.
         Values are symmetric (``p[i,j] == p[j,i]``). These are uncorrected —
-        apply FDR correction to the upper triangle before thresholding.
+        apply FDR correction to the upper triangle before thresholding via
+        ``correct_p_values``.
     surrogate_phases_all : ndarray, shape (n_permutations, n_cells, n_timepoints)
         Instantaneous phase extracted from each surrogate dataset. Stored for
         downstream reuse (e.g. phase consistency analysis) without recomputing.
 
     Notes
     -----
-    **FDR correction**: the returned p-values are uncorrected. Apply
-    Benjamini-Hochberg correction to the upper triangle only to avoid
-    inflating the number of tests due to the symmetric matrix::
+    **FDR correction**: the returned p-values are uncorrected. Pass them to
+    ``correct_p_values`` to apply Benjamini-Hochberg correction::
 
-        from scipy import stats
-        n = p_values.shape[0]
-        upper = np.triu_indices(n, k=1)
-        p_corrected = stats.false_discovery_control(p_values[upper], method='bh')
+        p_matrix, p_pairs = correct_p_values(p_values, cell_labels=cell_names)
 
     **Random seed**: set ``np.random.seed(seed)`` before calling this function
     to ensure reproducible results across runs.
@@ -544,20 +571,26 @@ def permutation_test(
     circular_shift_surrogate : Circular-shift surrogate generator.
     phase_randomisation_surrogate : FFT phase-randomisation surrogate generator.
     plv_einsum : PLV matrix computation.
+    correct_p_values : FDR correction for the returned p-values.
 
     Examples
     --------
-    >>> from functools import partial
-    >>> surrogate_fn = partial(circular_shift_surrogate,
-    ...                        min_interval=100, max_interval=500)
+    >>> # Circular shift — kwargs forwarded to circular_shift_surrogate
     >>> surr_plv, p_vals, surr_phases = permutation_test(
-    ...     signals, PLV, surrogate_fn, n_permutations=1000, plot_surrogates=3
+    ...     signals, PLV, circular_shift_surrogate,
+    ...     n_permutations=1000,
+    ...     min_interval=100, max_interval=500
+    ... )
+
+    >>> # Phase randomisation — no extra kwargs needed
+    >>> surr_plv, p_vals, surr_phases = permutation_test(
+    ...     signals, PLV, phase_randomisation_surrogate,
+    ...     n_permutations=1000
     ... )
     """
     surrogate_plv_list    = []
     surrogate_phases_list = []
 
-    # Plot empirical signals once before any surrogates
     if plot_surrogates > 0:
         n_cells = len(signals)
         fig, axes = plt.subplots(n_cells, 1,
@@ -572,10 +605,9 @@ def permutation_test(
         plt.show()
 
     for perm_idx in range(n_permutations):
-        surrogate_signals = surrogate_fn(signals)
+        surrogate_signals = surrogate_fn(signals, **surrogate_kwargs)
         surrogate_phases  = np.array([get_phase(s) for s in surrogate_signals])
 
-        # Plot only the first `plot_surrogates` surrogates
         if perm_idx < plot_surrogates:
             n_cells = len(surrogate_signals)
             fig, axes = plt.subplots(n_cells, 1,
@@ -592,82 +624,13 @@ def permutation_test(
         surrogate_phases_list.append(surrogate_phases)
         surrogate_plv_list.append(plv_einsum(surrogate_phases))
 
-    surrogate_plv_matrix = np.array(surrogate_plv_list)    # (n_perms, n_cells, n_cells)
-    surrogate_phases_all = np.array(surrogate_phases_list) # (n_perms, n_cells, n_timepoints)
+    surrogate_plv_matrix = np.array(surrogate_plv_list)
+    surrogate_phases_all = np.array(surrogate_phases_list)
 
-    # Vectorised p-value: fraction of surrogates with PLV >= empirical
-    # surrogate_plv_matrix broadcasts over empirical_plv along axis 0
     count    = np.sum(surrogate_plv_matrix >= empirical_plv[np.newaxis, :, :], axis=0)
-    p_values = (count + 1) / (n_permutations + 1)  # continuity correction
+    p_values = (count + 1) / (n_permutations + 1)
 
     return surrogate_plv_matrix, p_values, surrogate_phases_all
-
-# =============================================================================
-# Plotting traces
-# =============================================================================
-
-def plot_traces(time, data, title='Signals', figsize=(14, 6), status=None):
-    """
-    Plot multiple time series traces in a single figure.
-
-    Parameters
-    ----------
-    time : array_like, shape (n_timepoints,)
-        Time axis values corresponding to the data points.
-    data : DataFrame, shape (n_timepoints, n_traces)
-        Data to plot. Each column is one trace.
-    title : str, optional
-        Title of the plot. Default is 'Signals'.
-    figsize : tuple, optional
-        Figure size in inches (width, height). Default is (14, 6).
-    status : array_like of str, optional
-        Status labels for each trace (must match number of columns).
-        Traces with the same status get the same color. If None, each trace
-        gets a unique color from the default matplotlib cycle. Default is None.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-        The created figure object.
-    ax : matplotlib.axes.Axes
-        The created axes object.
-
-    Examples
-    --------
-    >>> # Color by status
-    >>> status = [' accepted', ' accepted', ' undecided']
-    >>> fig, ax = plot_traces(time, data, status=status)
-    
-    >>> # Each trace different color
-    >>> fig, ax = plot_traces(time, data)
-    """
-
-    fig, ax = plt.subplots(len(data.columns), 1, figsize=figsize, sharex=True)
-    ax = np.atleast_1d(ax)
-
-    if status is not None:
-        # Map unique labels to colors
-        unique_labels = list(dict.fromkeys(status))
-        color_map = {label: f'C{i}' for i, label in enumerate(unique_labels)}
-        
-        # Plot with colors by label
-        plotted_labels = set()
-        for i, col in enumerate(data.columns):
-            label = status.iloc[i]
-            color = color_map[label]
-            legend_label = label if label not in plotted_labels else None
-            ax[i].plot(time, data[col], color=color, alpha=0.7, linewidth=0.8, label=legend_label)
-            plotted_labels.add(label)
-    else:
-        for i, col in enumerate(data.columns):
-            ax[i].plot(time, data[col], alpha=0.7, linewidth=0.8)
-        ax[0].lines[0].set_label('traces')  # Label only the first line to avoid duplicates
-
-    fig.legend(loc='upper right')
-    fig.suptitle(title, fontweight='bold')
-    fig.supxlabel('Time (s)')
-    fig.supylabel('Signal')    
-    return fig, ax
 
 # =============================================================================
 # Finding discontinuities in the time axis
@@ -711,3 +674,101 @@ def detect_time_jumps(time, factor=1.5):
     jump_time = time[jump_indices]
 
     return time, jump_time
+
+# =============================================================================
+# Correcting and flattening p-value matrix
+# =============================================================================
+
+def correct_p_values(p_values, FDR_correction=True, cell_labels=None, method='bh'):
+    
+    """
+    Apply multiple comparison correction to a symmetric p-value matrix.
+
+    Extracts the upper triangle of the p-value matrix, applies optional
+    FDR correction, and returns both a symmetric corrected matrix and a
+    flat DataFrame of pairwise results.
+
+    Parameters
+    ----------
+    p_values : ndarray, shape (n_cells, n_cells)
+        Symmetric matrix of uncorrected p-values, as returned by
+        ``permutation_test``. Diagonal is ignored.
+    FDR_correction : bool, optional
+        If True, apply FDR correction using ``scipy.stats.false_discovery_control``.
+        If False, return uncorrected p-values. Default is True.
+    cell_labels : list of str or None, optional
+        Labels for each cell, used as row/column names in the output DataFrames.
+        If None, cells are labelled ``'Cell 0'``, ``'Cell 1'``, etc.
+        Default is None.
+    method : {'bh', 'by'}, optional
+        FDR correction method, passed to ``scipy.stats.false_discovery_control``.
+        Only used when ``FDR_correction=True``.
+
+        - ``'bh'`` : Benjamini-Hochberg (controls FDR under independence).
+        - ``'by'`` : Benjamini-Yekutieli (controls FDR under arbitrary dependence).
+
+        Default is ``'bh'``.
+
+    Returns
+    -------
+    p_vals_matrix : DataFrame, shape (n_cells, n_cells)
+        Symmetric matrix of corrected (or uncorrected) p-values, with
+        ``cell_labels`` as both row and column names. Diagonal entries are 1.
+    p_vals_pairs : DataFrame, shape (n_pairs, 1)
+        Flat table of corrected (or uncorrected) p-values for each unique
+        cell pair (upper triangle only). Index contains pair labels in the
+        format ``'Cell i vs. Cell j'``. Column is ``'p_value'``.
+
+    Raises
+    ------
+    ValueError
+        If ``FDR_correction=True`` and ``method`` is not ``'bh'`` or ``'by'``.
+
+    Examples
+    --------
+    >>> p_matrix, p_pairs = correct_p_values(p_values, cell_labels=cell_names)
+
+    >>> # Benjamini-Yekutieli correction (conservative, for dependent tests)
+    >>> p_matrix, p_pairs = correct_p_values(p_values, method='by', cell_labels=cell_names)
+
+    >>> # No correction
+    >>> p_matrix, p_pairs = correct_p_values(p_values, FDR_correction=False, cell_labels=cell_names)
+    """
+    
+    if FDR_correction and method not in ['bh', 'by']:
+        raise ValueError(
+            f"Invalid method '{method}'. "
+            "Use 'bh' for Benjamini-Hochberg or 'by' for Benjamini-Yekutieli."
+        )
+
+    n = p_values.shape[0]
+
+    if cell_labels is None:
+        cell_labels = [f"Cell {i}" for i in range(n)]
+
+    # Extract upper triangle (excluding diagonal)
+    upper_triangle_indices = np.triu_indices(n, k=1)
+    p_vals_upper = p_values[upper_triangle_indices]
+
+    # Apply correction or pass through
+    if FDR_correction:
+        p_vals_upper_corrected = stats.false_discovery_control(p_vals_upper, method=method)
+    else:
+        p_vals_upper_corrected = p_vals_upper
+
+    # Reconstruct symmetric matrix
+    p_vals_matrix = np.ones((n, n))
+    p_vals_matrix[upper_triangle_indices] = p_vals_upper_corrected
+    lower_triangle_indices = np.tril_indices(n, k=-1)
+    p_vals_matrix[lower_triangle_indices] = p_vals_matrix.T[lower_triangle_indices]
+
+    # Build output DataFrames
+    pair_labels = [
+        f"{cell_labels[i]} vs. {cell_labels[j]}"
+        for i, j in zip(*upper_triangle_indices)
+    ]
+
+    p_vals_matrix_df = pd.DataFrame(p_vals_matrix, index=cell_labels, columns=cell_labels)
+    p_vals_pairs_df  = pd.DataFrame(p_vals_upper_corrected, columns=['p_value'], index=pair_labels)
+
+    return p_vals_matrix_df, p_vals_pairs_df

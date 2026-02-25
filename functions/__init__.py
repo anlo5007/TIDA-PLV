@@ -110,7 +110,7 @@ from .utils import (
 # ---------------------------------------------------------------------------
 # Plotting and visualization
 # ---------------------------------------------------------------------------
-from .utils import (
+from .plots import (
     plot_traces,
 )
 

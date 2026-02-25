@@ -50,8 +50,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from functions.utils import plot_traces
 from functions.utils import detect_time_jumps
+from functions.plots import plot_traces
 
 import warnings
 
@@ -60,6 +60,53 @@ import warnings
 # =============================================================================
 
 class Recording:
+    """
+    Container for a calcium imaging recording and its associated metadata.
+
+    Loads traces, cell properties, and map image from a recording CSV file,
+    and provides interactive interval selection methods.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the traces CSV file.
+    keep_status : str, tuple of str, or None, optional
+        Cell status labels to retain (e.g. ``'accepted'`` or
+        ``(' accepted', ' undecided')``). None keeps all cells.
+        Default is None.
+
+    Attributes
+    ----------
+    path : Path
+        Path to the traces CSV file.
+    keep_status : tuple of str or None
+        Normalised status filter used when loading traces and props.
+    time : ndarray, shape (n_timepoints,)
+        Time axis in seconds. Updated in-place by ``select_interval``.
+    data : DataFrame, shape (n_timepoints, n_cells)
+        Fluorescence traces. Updated in-place by ``select_interval``.
+    status : Series
+        Status label for each retained cell.
+    cell_names : Index
+        Original column names from the CSV for the retained cells.
+    sampling_rate : float
+        Sampling rate in Hz.
+    props : DataFrame or None
+        Cell properties table (CentroidX, CentroidY, …), or None if no
+        props file is found.
+    map_img : ndarray or None
+        Cell map image array, or None if no PNG is found.
+
+    Examples
+    --------
+    >>> # Load from a known path
+    >>> rec = Recording("recording.csv", keep_status="accepted").load()
+
+    >>> # Load interactively via file dialog
+    >>> rec = Recording.from_dialog(keep_status="accepted")
+    >>> rec.select_interval(method='single_click', window=100)
+    """
+
     def __init__ (self, path, keep_status=None):
 
         self.path = Path(path)
@@ -75,12 +122,44 @@ class Recording:
 
     @classmethod
     def from_dialog(cls, keep_status=None):
+        """
+        Create a Recording by selecting a CSV file via a file dialog.
+
+        Opens a tkinter dialog for the user to choose the recording CSV,
+        then calls ``load`` automatically. Returns None if the dialog is
+        cancelled.
+
+        Parameters
+        ----------
+        keep_status : str, tuple of str, or None, optional
+            Passed directly to ``__init__``. Default is None (keep all cells).
+
+        Returns
+        -------
+        rec : Recording or None
+            Fully loaded Recording instance, or None if no file was selected.
+        """
+
         path = select_file(title='Select recording CSV')
         if path is None:
             return None
         return cls(path, keep_status=keep_status).load()
 
     def load(self):
+        """
+        Load the recording, props, and map image from disk.
+
+        Populates ``time``, ``data``, ``status``, ``cell_names``,
+        ``sampling_rate``, ``props``, and ``map_img``. Props and map are
+        located automatically and set to None if not found.
+
+        Returns
+        -------
+        self : Recording
+            Returns self to allow method chaining::
+
+                rec = Recording(path).load()
+        """
         self.time, self.data, self.status, self.cell_names, self.sampling_rate = \
             load_recording(self.path, keep_status=self.keep_status)
 
@@ -93,6 +172,43 @@ class Recording:
         return self
     
     def select_interval(self, method='single_click', **kwargs):
+        """
+        Interactively trim the recording to a time interval.
+
+        Updates ``self.time`` and ``self.data`` in-place. The time axis
+        is reset to start at 0 after selection.
+
+        Parameters
+        ----------
+        method : {'single_click', 'manual', 'double_click', 'block'}, optional
+            Interval selection method. Default is ``'single_click'``.
+
+            - ``'single_click'``  : click once to set interval start; duration
+              controlled by ``window`` kwarg (default 100 s).
+            - ``'manual'``        : pass ``start_time`` and ``end_time`` kwargs
+              directly, no interaction required.
+            - ``'double_click'``  : click twice to set start and end.
+            - ``'block'``         : click within a contiguous block defined by
+              detected time jumps.
+
+        **kwargs
+            Forwarded to the underlying selection function. Common kwargs:
+
+            - ``window`` (float) - interval duration in seconds (single_click only).
+            - ``start_time``, ``end_time`` (float) - interval bounds (manual only).
+            - ``plot_selection`` (bool) - whether to plot the selected interval.
+            - ``plot_original`` (bool) - whether to plot the full trace first (manual only).
+            - ``reset_index`` (bool) - whether to reset the index of the returned interval_data DataFrame. Default is True.
+
+        Returns
+        -------
+        self : Recording
+            Returns self to allow method chaining::
+
+                rec.select_interval(method='manual', start_time=30, end_time=90)
+
+        """
+
         if method == 'single_click':
             self.time, self.data = select_click_interval(
                 self.time, self.data, status=self.status, **kwargs)
@@ -555,7 +671,7 @@ def load_map(map_path):
 # Interval trace selection 
 # =============================================================================
 
-def select_interval_manual(time, data, start_time=0, end_time=None, status=None, plot_original=True, plot_selection=True, mark_jumps=True):
+def select_interval_manual(time, data, start_time=0, end_time=None, status=None, plot_original=True, plot_selection=True, mark_jumps=True, reset_index=True):
     """
     Extract a time interval from the recording based on manual start/end times.
 
@@ -581,6 +697,8 @@ def select_interval_manual(time, data, start_time=0, end_time=None, status=None,
     mark_jumps : bool, optional
         If True, detect and mark time jumps on the plot with vertical dashed lines.
         Default is True.
+    reset_index : bool, optional
+        If True, reset the index of the returned interval_data DataFrame. Default is True.
 
     Returns
     -------
@@ -643,11 +761,15 @@ def select_interval_manual(time, data, start_time=0, end_time=None, status=None,
         plt.show()
 
     interval_data = data.iloc[indx_start:indx_end, :]
+    
+    if reset_index:
+        interval_data = interval_data.reset_index(drop=True)
+
     interval_time = time[indx_start:indx_end] - time[indx_start]  # reset time to start at 0 for the interval
 
     return interval_time, interval_data
 
-def select_click_interval (time, data, window=100, status=None, plot_selection=True, mark_jumps=True):
+def select_click_interval (time, data, window=100, status=None, plot_selection=True, mark_jumps=True, reset_index=True):
     """
     Extract a time interval from the recording by clicking on a plot.
 
@@ -671,6 +793,8 @@ def select_click_interval (time, data, window=100, status=None, plot_selection=T
     mark_jumps : bool, optional
         If True, detect and mark time jumps on the plot with vertical dashed lines.
         Default is True.
+    reset_index : bool, optional
+        If True, reset the index of the returned interval_data DataFrame. Default is True.
 
     Returns
     -------
@@ -739,6 +863,10 @@ def select_click_interval (time, data, window=100, status=None, plot_selection=T
     end_indx = np.searchsorted(time, click_time + window)
 
     interval_data = data.iloc[start_indx:end_indx, :]
+
+    if reset_index:
+        interval_data = interval_data.reset_index(drop=True)
+
     interval_time = time[start_indx:end_indx] - time[start_indx]  # reset time to start at 0 for the interval
 
     if plot_selection:
@@ -747,7 +875,7 @@ def select_click_interval (time, data, window=100, status=None, plot_selection=T
 
     return interval_time, interval_data
 
-def select_double_click(time, data, status=None, plot_selection=True, mark_jumps=True):
+def select_double_click(time, data, status=None, plot_selection=True, mark_jumps=True, reset_index=True):
     """
     Extract a time interval from the recording by double-clicking on a plot.
 
@@ -768,6 +896,8 @@ def select_double_click(time, data, status=None, plot_selection=True, mark_jumps
     mark_jumps : bool, optional
         If True, detect and mark time jumps on the plot with vertical dashed lines.
         Default is True.
+    reset_index : bool, optional
+        If True, reset the index of the returned interval_data DataFrame. Default is True.
 
     Returns
     -------
@@ -832,6 +962,10 @@ def select_double_click(time, data, status=None, plot_selection=True, mark_jumps
     end_indx = np.searchsorted(time, click_right)
 
     interval_data = data.iloc[start_indx:end_indx, :]
+
+    if reset_index:
+        interval_data = interval_data.reset_index(drop=True) 
+
     interval_time = time[start_indx:end_indx] - time[start_indx]  # reset time to start at 0 for the interval
 
     if plot_selection:
@@ -840,7 +974,7 @@ def select_double_click(time, data, status=None, plot_selection=True, mark_jumps
 
     return interval_time, interval_data
 
-def select_block(time, data, status=None, plot_selection=True):
+def select_block(time, data, status=None, plot_selection=True, reset_index=True):
     """
     Extract a contiguous time block from a concatenated recording by clicking.
 
@@ -859,6 +993,8 @@ def select_block(time, data, status=None, plot_selection=True):
         use the default matplotlib color cycle. Default is None.
     plot_selection : bool, optional
         If True, plot the selected block after extraction. Default is True.
+    reset_index : bool, optional
+        If True, reset the index of the returned block_data DataFrame. Default is True.
 
     Returns
     -------
@@ -940,6 +1076,9 @@ def select_block(time, data, status=None, plot_selection=True):
     mask = (time >= t_start) & (time < t_end)
     block_time = time[mask] - time[mask][0]  # Reset to 0
     block_data = data.loc[mask, :]
+
+    if reset_index:
+        block_data = block_data.reset_index(drop=True)
 
     # Plot selected block
     if plot_selection:
