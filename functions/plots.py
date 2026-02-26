@@ -38,6 +38,8 @@ See Also
 matplotlib.pyplot
 """
 
+from pydoc import text
+
 from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
@@ -117,20 +119,36 @@ def plot_traces(time, data, title='Signals', figsize=(14, 6), status=None):
 # Plotting PLV matrices
 # =============================================================================
 
-def plot_plv_matrix(plv_matrix, title='PLV Matrix', figsize=(10, 10), cmap='viridis', labels=None):
+def plot_plv_matrix(plv_matrix, p_val_matrix=None, plot_stat=True, only_significant=True, 
+                    title='Phase Locking Value (PLV) Matrix', figsize=(12, 12), **kwargs):
+    
     """
-    Plot a Phase Locking Value (PLV) matrix as a heatmap.
+    Plot a Phase Locking Value (PLV) matrix as a heatmap with optional
+    significance annotations.
 
     Parameters
     ----------
-    plv_matrix : array_like, shape (n_traces, n_traces)
-        Square matrix of PLV values between pairs of traces.
+    plv_matrix : DataFrame, shape (n_cells, n_cells)
+        Symmetric matrix of PLV values between all cell pairs. Values are
+        in [0, 1], where 1 indicates perfect phase locking and 0 indicates
+        no locking. Row and column labels are used as axis tick labels.
+    p_val_matrix : DataFrame, shape (n_cells, n_cells) or None, optional
+        Symmetric matrix of BH-adjusted p-values, as returned by
+        ``correct_p_values``. Must have the same shape as ``plv_matrix``.
+        If None, no significance annotations are added. Default is None.
+    plot_stat : bool, optional
+        If True and ``p_val_matrix`` is provided, annotate each cell with
+        significance stars and the adjusted p-value. Default is True.
+    only_significant : bool, optional
+        If True, only annotate cells that are significant (p < 0.05).
+        If False, annotate all cells with their p-value. Default is True.
     title : str, optional
-        Title of the plot. Default is 'PLV Matrix'.
-    figsize : tuple, optional
-        Figure size in inches (width, height). Default is (10, 10).
-    cmap : str or Colormap, optional
-        Colormap to use for the heatmap. Default is 'viridis'.
+        Title of the plot. Default is ``'Phase Locking Value (PLV) Matrix'``.
+    figsize : tuple of float, optional
+        Figure size in inches (width, height). Default is (12, 12).
+    **kwargs
+        Additional keyword arguments forwarded to ``seaborn.heatmap``
+        (e.g. ``cmap``, ``vmin``, ``vmax``, ``xticklabels``, ``yticklabels``).
 
     Returns
     -------
@@ -139,14 +157,73 @@ def plot_plv_matrix(plv_matrix, title='PLV Matrix', figsize=(10, 10), cmap='viri
     ax : matplotlib.axes.Axes
         The created axes object.
 
+    Raises
+    ------
+    ValueError
+        If ``p_val_matrix`` is provided but has a different shape than
+        ``plv_matrix``.
+
+    Notes
+    -----
+    Significance stars follow the conventional thresholds:
+
+    - ``****`` : p < 0.0001
+    - ``***``  : p < 0.001
+    - ``**``   : p < 0.01
+    - ``*``    : p < 0.05
+
+    Stars are shown in red; non-significant p-values (when ``only_significant=False``)
+    are shown in black. The adjusted p-value is displayed below the stars in
+    scientific notation.
+
     Examples
     --------
-    >>> fig, ax = plot_plv_matrix(plv_matrix)
+    >>> # PLV matrix only
+    >>> fig, ax = plot_plv_matrix(plv_matrix, cmap='viridis')
+
+    >>> # With significance annotations (significant pairs only)
+    >>> fig, ax = plot_plv_matrix(plv_matrix, p_val_matrix=p_matrix,
+    ...                           cmap='viridis')
+
+    >>> # Annotate all pairs including non-significant
+    >>> fig, ax = plot_plv_matrix(plv_matrix, p_val_matrix=p_matrix,
+    ...                           only_significant=False, cmap='viridis')
     """
 
+    if p_val_matrix is not None and plv_matrix.shape != p_val_matrix.shape:
+        raise ValueError(
+            f'plv_matrix shape is incompatible with p_val_matrix shape: '
+            f'{plv_matrix.shape} vs. {p_val_matrix.shape}'
+        )
+
     fig, ax = plt.subplots(figsize=figsize)
-    sns.heatmap(plv_matrix, ax=ax, cmap=cmap, square=True,)
-    ax.set_title(title, fontweight='bold')
-    ax.set_xlabel('Trace Index')
-    ax.set_ylabel('Trace Index')
+    sns.heatmap(plv_matrix, ax=ax, **kwargs)
+
+    if p_val_matrix is not None and plot_stat:
+        p_vals_np = p_val_matrix.to_numpy()  # convert once outside the loop
+        for i in range(p_vals_np.shape[0]):
+            for j in range(p_vals_np.shape[1]):
+                p_val = p_vals_np[i, j]
+
+                if p_val < 0.0001:
+                    marker, text_color = f'****\n{p_val:.4g}', 'red'
+                elif p_val < 0.001:
+                    marker, text_color = f'***\n{p_val:.4g}', 'red'
+                elif p_val < 0.01:
+                    marker, text_color = f'**\n{p_val:.4g}', 'red'
+                elif p_val < 0.05:
+                    marker, text_color = f'*\n{p_val:.4g}', 'red'
+                elif not only_significant:
+                    marker, text_color = f'{p_val:.4g}', 'black'
+                else:
+                    marker, text_color = '', 'black'
+
+                if marker:
+                    ax.text(j + 0.5, i + 0.5, marker, ha='center', va='center',
+                            color=text_color, fontsize=8)
+
+    ax.set_title(f'{title}\n(* p<0.05, ** p<0.01, *** p<0.001, **** p<0.0001)')
+    plt.tight_layout()
+    plt.show()
+
     return fig, ax
