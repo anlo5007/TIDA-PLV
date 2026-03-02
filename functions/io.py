@@ -49,11 +49,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
 
 from functions.utils import detect_time_jumps
 from functions.plots import plot_traces
 
 import warnings
+
+import os
+
 
 # =============================================================================
 # Recording is a class that facilitate importing files
@@ -1088,6 +1093,49 @@ def select_block(time, data, status=None, plot_selection=True, reset_index=True)
 
     return block_time, block_data
 
+# =============================================================================
+# Export Opened Figures in Multipage PDF
+# =============================================================================
 
-        
+def save_open_figs(save_folder=None, save_name=None):
+    """
+    Save all currently open matplotlib figures into a single PDF file.
+
+    Parameters
+    ----------
+    save_folder : Path or str, optional
+        Directory where the PDF will be saved. Defaults to the current
+        working directory if not specified.
+    save_name : str, optional
+        Name of the output PDF file. Defaults to 'All_Results.pdf'.
+
+    Returns
+    -------
+    None
+        Saves a PDF file to disk and closes all open figures.
+
+    Examples
+    --------
+    >>> save_open_figs(save_folder=Path('/my/folder'), save_name='results.pdf')
+    >>> save_open_figs()  # saves as All_Results.pdf in current directory
+    """
+    
+    if save_folder is None:
+        save_folder = Path(os.getcwd())
+        print(f'path not specified saving in current directory: {save_folder}')
+    
+    if save_name is None:
+        save_name = 'All_Results.pdf'
+
+    complete_path = str(save_folder / save_name)
+
+    figs = list(map(plt.figure, plt.get_fignums()))
+
+    with PdfPages(complete_path) as pdf:
+        for fig in figs:
+            pdf.savefig(fig)
+            plt.close(fig)
+
+
+    
         
