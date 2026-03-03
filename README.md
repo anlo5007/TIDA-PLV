@@ -1,6 +1,6 @@
 # TIDA-PLV
 
-**TIDA-PLV** is a Python toolkit for Phase Locking Value (PLV) analysis of neuronal calcium imaging traces, developed for TIDA (Tuberoinfundibular Dopaminergic) neuron recordings.
+**TIDA-PLV** is a Python toolkit for Phase Locking Value (PLV) analysis of neuronal calcium imaging traces, developed for Tuberoinfundibular Dopaminergic (TIDA) neuron recordings.
 
 Developed by **Andrea Locarno** — [Christian Broberger Lab](https://www.su.se/english/research/research-catalogue/research-groups/c/christian-brobergers-research-group)
 
