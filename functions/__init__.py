@@ -9,10 +9,15 @@ Submodules
 io
     Loading calcium imaging recordings and associated metadata files.
     File selection dialogs, CSV parsing, props and map image loading.
+    The ``Recording`` class is the recommended high-level interface.
 
 utils
     Signal processing, PLV computation, surrogate generation and
     permutation-based significance testing.
+
+plots
+    Visualization utilities for traces, PLV matrices, spatial maps,
+    and surrogate distributions.
 
 Quick Start
 -----------
@@ -20,42 +25,44 @@ Typical usage in a Jupyter notebook::
 
     import functions as plv
 
-    # 1. Load data
-    recording_path          = plv.select_file()
-    time, data, labels, fs  = plv.load_recording(recording_path)
-    props                   = plv.load_props(plv.locate_props(recording_path))
-    map_img                 = plv.load_map(plv.locate_map(recording_path))
+    # 1. Load data (high-level interface)
+    recording = plv.Recording.from_dialog(keep_status=('accepted', 'undecided'))
 
-    # 1. Select interval (optional)
-    time, data = plv.select_interval_manual(time, data, start_time=10, end_time=60, status=labels)
-    # or
-    time, data = plv.select_click_interval(time, data, status=labels, window=50)
-    # or
-    time, data = plv.select_double_click(time, data, status=labels)
+    # 2. Select interval
+    recording.select_interval(method='single_click', window=300)
 
     # 3. Preprocess
-    filtered = [plv.bandpass(data[col].values, fs, 0.01, 1.0)
-                for col in data.columns]
-    phases   = np.array([plv.get_phase(sig) for sig in filtered])
+    filtered = recording.data.apply(lambda x: plv.bandpass(x, recording.sampling_rate, 0.01, 1.0))
+    phases   = filtered.apply(plv.get_phase)
 
     # 4. PLV
-    PLV = plv.plv_einsum(phases)
+    PLV, phase_diff = plv.plv_einsum(phases.T.to_numpy())
 
     # 5. Permutation test
-    from functools import partial
-    surrogate_fn = partial(plv.circular_shift_surrogate,
-                           min_interval=100, max_interval=500)
-    surr_plv, p_vals, surr_phases = plv.permutation_test(
-        np.array(filtered), PLV, surrogate_fn
+    surr_plv, p_vals, surr_phase, _ = plv.permutation_test(
+        filtered.T.to_numpy(), PLV, phase_diff,
+        surrogate_fn=plv.circular_shift_surrogate,
+        n_permutations=1000,
+        min_interval=100, max_interval=500
     )
+
+    # 6. Correct p-values
+    p_matrix, p_pairs = plv.correct_p_values(p_vals, cell_labels=recording.cell_names)
 
 See Also
 --------
-utils.py, io.py
+utils.py, io.py, plots.py
 """
 
 # ---------------------------------------------------------------------------
-# IO — file loading and selection
+# IO — high-level Recording class
+# ---------------------------------------------------------------------------
+from .io import (
+    Recording,
+)
+
+# ---------------------------------------------------------------------------
+# IO — low-level file loading and selection
 # ---------------------------------------------------------------------------
 from .io import (
     select_file,
@@ -67,6 +74,8 @@ from .io import (
     select_interval_manual,
     select_click_interval,
     select_double_click,
+    select_block,
+    save_open_figs,
 )
 
 # ---------------------------------------------------------------------------
@@ -105,6 +114,21 @@ from .utils import (
 # ---------------------------------------------------------------------------
 from .utils import (
     permutation_test,
+    correct_p_values,
+)
+
+# ---------------------------------------------------------------------------
+# Spatial analysis
+# ---------------------------------------------------------------------------
+from .utils import (
+    compute_pairwise_distances,
+)
+
+# ---------------------------------------------------------------------------
+# Time discontinuities
+# ---------------------------------------------------------------------------
+from .utils import (
+    detect_time_jumps,
 )
 
 # ---------------------------------------------------------------------------
@@ -112,20 +136,19 @@ from .utils import (
 # ---------------------------------------------------------------------------
 from .plots import (
     plot_traces,
-)
-
-# ---------------------------------------------------------------------------
-# Finding time discountinuities
-# ---------------------------------------------------------------------------
-from .utils import (
-    detect_time_jumps,
+    plot_plv_matrix,
+    plot_plv_map,
+    plot_surrogate_vs_empirical,
 )
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 __all__ = [
-    # IO
+    # IO — high-level
+    'Recording',
+
+    # IO — low-level
     'select_file',
     'load_recording',
     'locate_props',
@@ -135,7 +158,9 @@ __all__ = [
     'select_interval_manual',
     'select_click_interval',
     'select_double_click',
-    
+    'select_block',
+    'save_open_figs',
+
     # Signal conditioning
     'bandpass',
     'get_phase',
@@ -153,10 +178,17 @@ __all__ = [
 
     # Significance
     'permutation_test',
-    
-    # Plotting
-    'plot_traces',
+    'correct_p_values',
+
+    # Spatial
+    'compute_pairwise_distances',
 
     # Time discontinuities
     'detect_time_jumps',
+
+    # Plotting
+    'plot_traces',
+    'plot_plv_matrix',
+    'plot_plv_map',
+    'plot_surrogate_vs_empirical',
 ]
