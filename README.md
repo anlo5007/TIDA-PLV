@@ -24,7 +24,7 @@ TIDA-PLV provides a complete pipeline for quantifying synchrony between neurons 
 
 ### Requirements
 
-- Python ≥ 3.8
+- Python ≥ 3.8 (tested on 3.12)
 - numpy
 - pandas
 - scipy
