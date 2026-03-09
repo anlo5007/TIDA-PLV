@@ -482,3 +482,241 @@ def plot_surrogate_vs_empirical(empirical_matrix, surrogate_matrix, n_bins=100,
     plt.show()
 
     return fig, axes
+
+
+# =============================================================================
+# Plotting power spectra overview
+# =============================================================================
+
+def plot_spectra(freq_axis, psds, dominant_freqs, highpass_cutoff=None,
+                 figsize=(14, 5), title='Spectral Overview'):
+    """
+    Plot a 2-panel spectral overview: PSD per cell and dominant frequency
+    distribution.
+
+    Parameters
+    ----------
+    freq_axis : ndarray, shape (n_freqs,)
+        Frequency axis in Hz, as returned by ``compute_spectra``.
+    psds : ndarray, shape (n_cells, n_freqs)
+        Power spectra, one row per cell, as returned by ``compute_spectra``.
+    dominant_freqs : Series, shape (n_cells,)
+        Dominant frequency per cell in Hz, as returned by ``compute_spectra``.
+    highpass_cutoff : float, optional
+        Upper bound of the bandpass filter in Hz. Used to limit the x-axis
+        of the PSD panel to the frequency range of interest. Default is None.
+        The spectrum will be plotted from 0 to fs/2. 
+    figsize : tuple of float, optional
+        Figure size in inches (width, height). Default is (14, 5).
+    title : str, optional
+        Overall figure title. Default is ``'Spectral Overview'``.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The created figure object.
+    axes : ndarray of matplotlib.axes.Axes, shape (2,)
+        The two created axes: ``axes[0]`` is the PSD panel,
+        ``axes[1]`` is the dominant frequency histogram.
+
+    Notes
+    -----
+    The median dominant frequency is marked on the PSD panel (red dashed
+    line) while the mean is marked on the histogram panel. Median is
+    preferred on the PSD panel because it is more robust to outlier cells
+    with anomalous dominant frequencies.
+
+    A coefficient of variation (CV) summary is printed to stdout as a
+    scalar measure of spectral heterogeneity across the population:
+    CV ≈ 0 indicates a spectrally homogeneous population; larger values
+    indicate heterogeneous dominant frequency distributions.
+
+    See Also
+    --------
+    compute_spectra : Produces all three array inputs to this function.
+
+    Examples
+    --------
+    >>> dominant_freqs, freq_axis, psds = compute_spectra(filtered_sorted, sampling_rate)
+    >>> fig, axes = plot_spectra(freq_axis, psds, dominant_freqs, highpass_cutoff=1.0)
+    """
+    n_cells = psds.shape[0]
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    # ── Panel 1: PSD per cell ──────────────────────────────────────────────────
+    ax = axes[0]
+    for psd in psds:
+        ax.plot(freq_axis, psd, alpha=0.5, linewidth=0.9)
+    ax.axvline(
+        np.median(dominant_freqs),
+        color='red', linestyle='--', linewidth=1.8,
+        label=f'Median dominant freq ({np.median(dominant_freqs):.3f} Hz)',
+    )
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('Power')
+    ax.set_title('PSD per Cell')
+    if highpass_cutoff is not None:
+        ax.set_xlim([0, highpass_cutoff])
+    ax.legend(fontsize=8)
+
+    # ── Panel 2: dominant frequency histogram ─────────────────────────────────
+    ax = axes[1]
+    ax.hist(dominant_freqs, bins=min(30, n_cells), color='steelblue', edgecolor='white')
+    ax.axvline(
+        dominant_freqs.mean(),
+        color='red', linestyle='--', linewidth=1.8,
+        label=f'Mean: {dominant_freqs.mean():.3f} Hz',
+    )
+    ax.set_xlabel('Dominant Frequency (Hz)')
+    ax.set_ylabel('Cell count')
+    ax.set_title('Dominant Frequency Distribution')
+    ax.legend(fontsize=8)
+
+    fig.suptitle(title, fontweight='bold')
+    plt.tight_layout()
+    plt.show()
+
+    # Scalar summary of spectral heterogeneity
+    cv = dominant_freqs.std() / dominant_freqs.mean()
+    print(f"Dominant frequency CV: {cv:.3f}")
+    print(f"  (CV \u2248 0 = spectrally homogeneous population, CV >> 0 = heterogeneous)")
+
+    return fig, axes
+
+# =============================================================================
+# PLV vs. JS Distance scatter plot
+# =============================================================================
+
+def plot_plv_vs_jsd(plv_vector, jsd_vector, p_val_vector=None,
+                    r=None, p=None,
+                    alpha_threshold=0.05,
+                    colors=None,
+                    figsize=(7, 6),
+                    title='PLV vs. JS Distance',
+                    **kwargs):
+    """
+    Scatter plot of PLV against Jensen-Shannon spectral distance for all
+    unique cell pairs, with optional colour coding by PLV significance.
+
+    Parameters
+    ----------
+    plv_vector : DataFrame, shape (n_pairs, 1)
+        PLV values for each unique cell pair, as returned by
+        ``correct_p_values``.
+    jsd_vector : DataFrame, shape (n_pairs, 1)
+        JS Distance values for each unique cell pair, as returned by
+        linearising ``compute_spectral_jsd`` output via ``correct_p_values``.
+    p_val_vector : DataFrame, shape (n_pairs, 1) or None, optional
+        BH-corrected p-values for PLV, as returned by ``correct_p_values``.
+        If provided, pairs are colour-coded by significance. If None, all
+        pairs are plotted in a single colour. Default is None.
+    r : float or None, optional
+        Pearson correlation coefficient between JSD and PLV, computed
+        externally. If provided alongside ``p``, annotated in the title.
+        Default is None.
+    p : float or None, optional
+        P-value for the Pearson correlation, computed externally.
+        Default is None.
+    alpha_threshold : float, optional
+        Significance threshold applied to ``p_val_vector``. Default is 0.05.
+    colors : tuple of 2 str or None, optional
+        Colours for (non-significant, significant) groups respectively.
+        If None, the first two colours of the active matplotlib cycle are
+        used. Default is None.
+    figsize : tuple of float, optional
+        Figure size in inches (width, height). Default is (7, 6).
+    title : str, optional
+        Title of the plot. Default is ``'PLV vs. JS Distance'``.
+    **kwargs
+        Additional keyword arguments forwarded to ``ax.scatter``
+        (e.g. ``alpha``, ``s``, ``marker``). Applied equally to both
+        groups when ``p_val_vector`` is provided.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The created figure object.
+    ax : matplotlib.axes.Axes
+        The created axes object.
+
+    Notes
+    -----
+    Pearson r and p-value are computed externally and passed in rather
+    than computed inside this function, keeping statistical computation
+    separate from visualisation::
+
+        from scipy.stats import pearsonr
+        r, p = pearsonr(jsd_vector.iloc[:, 0], plv_vector.iloc[:, 0])
+        fig, ax = plot_plv_vs_jsd(plv_vector, jsd_vector,
+                                   p_val_vector=p_vals_vector, r=r, p=p)
+
+    A negative r is expected if significantly phase-locked pairs also
+    tend to have similar spectral profiles — high PLV coincides with
+    low JS Distance.
+
+    See Also
+    --------
+    compute_spectral_jsd : Produces the JS Distance matrix.
+    correct_p_values     : Linearises matrices into pair vectors.
+
+    Examples
+    --------
+    >>> # Default matplotlib colours
+    >>> fig, ax = plot_plv_vs_jsd(PLV_vals_vector, jsd_vector,
+    ...                            p_val_vector=p_vals_vector, r=r, p=p)
+
+    >>> # Custom colours and marker style
+    >>> fig, ax = plot_plv_vs_jsd(PLV_vals_vector, jsd_vector,
+    ...                            p_val_vector=p_vals_vector, r=r, p=p,
+    ...                            colors=('gray', 'crimson'),
+    ...                            alpha=0.6, s=40)
+    """
+    # Fall back to first two colours of the active matplotlib cycle
+    cycle      = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    c_nonsig, c_sig = colors if colors is not None else (cycle[0], cycle[1])
+
+    jsd_col = jsd_vector.columns[0]
+    plv_col = plv_vector.columns[0]
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    if p_val_vector is not None:
+        p_col    = p_val_vector.columns[0]
+        sig_mask = p_val_vector[p_col] < alpha_threshold
+
+        ax.scatter(
+            jsd_vector.loc[~sig_mask, jsd_col],
+            plv_vector.loc[~sig_mask, plv_col],
+            color=c_nonsig,
+            label='PLV not significant',
+            **kwargs,
+        )
+        ax.scatter(
+            jsd_vector.loc[sig_mask, jsd_col],
+            plv_vector.loc[sig_mask, plv_col],
+            color=c_sig,
+            label=f'PLV significant (p<{alpha_threshold})',
+            **kwargs,
+        )
+        ax.legend()
+    else:
+        ax.scatter(
+            jsd_vector[jsd_col], plv_vector[plv_col],
+            color=c_nonsig, **kwargs,
+        )
+
+    # Annotate title with Pearson r if provided
+    if r is not None and p is not None:
+        ax.set_title(
+            f'{title}\nPearson r = {r:.3f}  (p = {p:.3g}, all pairs)',
+            fontweight='bold',
+        )
+    else:
+        ax.set_title(title, fontweight='bold')
+
+    ax.set_xlabel('JS Distance (\u221aJSD)', fontsize=12)
+    ax.set_ylabel('PLV', fontsize=12)
+    plt.tight_layout()
+    plt.show()
+
+    return fig, ax

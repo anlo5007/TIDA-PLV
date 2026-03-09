@@ -17,6 +17,8 @@ Signal conditioning
 
 Spectral analysis
     dominant_frequency            : FFT-based dominant frequency extraction.
+    compute_spectra               : Apply dominant_frequency across all cells in a DataFrame.
+    compute_spectral_correlation  : Vectorised pairwise Pearson r and p-values from power spectra.
 
 Phase Locking Value
     plv_einsum                    : Fast pairwise PLV matrix (einsum).
@@ -49,6 +51,9 @@ import math
 
 from scipy import stats
 from scipy.signal import hilbert, butter, filtfilt
+from scipy.stats import t as t_dist
+from scipy.spatial.distance import jensenshannon
+
 
 import numpy as np
 import pandas as pd 
@@ -247,7 +252,7 @@ def dominant_frequency(signal, fs, hann=True, poly_order=4, plot=False):
 
     # Optional polynomial detrending
     if poly_order is not None:
-        signal = poly_detrend(signal, order=poly_order).to_numpy()  # Convert back to ndarray if input was a Series
+        signal = poly_detrend(signal, order=poly_order)  # Convert back to ndarray if input was a Series
 
     # FFT
     fft_vals = np.fft.rfft(signal)
@@ -269,6 +274,76 @@ def dominant_frequency(signal, fs, hann=True, poly_order=4, plot=False):
 
     max_freq = freqs[idx]
     return max_freq, freqs, power, signal
+
+def compute_spectra(filtered_df, fs, hann=False, poly_order=4):
+    """
+    Apply ``dominant_frequency`` to every cell in a DataFrame and collect results.
+
+    Iterates over columns of ``filtered_df``, calls ``dominant_frequency`` on
+    each, and assembles the outputs into arrays suitable for downstream spectral
+    similarity analysis. The frequency axis is computed once and reused, since
+    it is identical for all cells given a fixed sampling rate and signal length.
+
+    Parameters
+    ----------
+    filtered_df : DataFrame, shape (n_timepoints, n_cells)
+        Bandpass-filtered calcium traces. Each column is one cell.
+        Should be the clustering-sorted DataFrame (``filtered_sorted``) so
+        that the returned arrays are already in the correct cell order for
+        comparison with the PLV matrix.
+    fs : float
+        Sampling frequency in Hz.
+    hann : bool, optional
+        If True, apply a Hann window before computing the FFT inside
+        ``dominant_frequency``. Default is False.
+    poly_order : int or None, optional
+        Polynomial detrending order passed to ``dominant_frequency``.
+        Set to None to skip detrending. Default is 4.
+
+    Returns
+    -------
+    dominant_freqs : Series, shape (n_cells,)
+        Peak FFT frequency in Hz for each cell, indexed by column name.
+    freq_axis : ndarray, shape (n_freqs,)
+        Frequency axis in Hz, shared across all cells. Length is
+        ``n_timepoints // 2 + 1`` (one-sided spectrum).
+    psds : ndarray, shape (n_cells, n_freqs)
+        Power spectrum for each cell. Row order matches the column order
+        of ``filtered_df``.
+
+    Notes
+    -----
+    This function is a thin organisational wrapper around ``dominant_frequency``
+    and adds no signal processing logic of its own. If you need per-cell
+    frequency estimates only (not the spectra), use ``dominant_frequency``
+    directly or call ``filtered_df.apply``.
+
+    The returned ``psds`` array is the direct input to spectral similarity
+    analysis via ``np.corrcoef(psds)``, which computes the pairwise Pearson
+    correlation between spectral profiles.
+
+    See Also
+    --------
+    dominant_frequency : Single-cell FFT-based dominant frequency extraction.
+
+    Examples
+    --------
+    >>> dominant_freqs, freq_axis, psds = compute_spectra(filtered_sorted, sampling_rate)
+    >>> print(f"Slowest cell: {dominant_freqs.idxmin()} @ {dominant_freqs.min():.4f} Hz")
+    >>> spec_corr = np.corrcoef(psds)   # pairwise spectral similarity matrix
+    """
+    dominant_freqs_dict, psds, freq_axis = {}, [], None
+
+    for col in filtered_df.columns:
+        max_freq, f, power, _ = dominant_frequency(
+            filtered_df[col], fs, hann=hann, poly_order=poly_order
+        )
+        dominant_freqs_dict[col] = max_freq
+        psds.append(power)
+        if freq_axis is None:
+            freq_axis = f  # frequency axis is identical for all cells given fixed fs and length
+
+    return pd.Series(dominant_freqs_dict), freq_axis, np.array(psds)
 
 
 # =============================================================================
@@ -911,3 +986,185 @@ def compute_pairwise_distances(props, pair_labels):
         distances.append(math.dist([x1, y1], [x2, y2]))
 
     return pd.DataFrame(distances, index=pair_labels, columns=['distance_px'])
+
+# =============================================================================
+# Pairwise spectral correlation
+# =============================================================================
+
+def compute_spectral_correlation(psds, cell_labels=None):
+    """
+    Compute the pairwise Pearson correlation matrix of power spectra and
+    the associated two-tailed p-values, fully vectorised.
+
+    Correlation values are computed in a single call to ``numpy.corrcoef``.
+    P-values are derived analytically from the t-distribution, avoiding
+    O(n_cells^2) individual ``pearsonr`` calls::
+
+        t = r * sqrt((n_freqs - 2) / (1 - r^2))
+        p = 2 * t.sf(|t|, df = n_freqs - 2)
+
+    Parameters
+    ----------
+    psds : ndarray, shape (n_cells, n_freqs)
+        Power spectra, one row per cell. Typically the third return value
+        of ``compute_spectra``. Row order must match the clustering order
+        of the PLV matrix for cross-matrix consistency.
+    cell_labels : array-like of str or None, optional
+        Labels for each cell, used as row and column names in the output
+        DataFrames. If None, cells are labelled ``'Cell 0'``, ``'Cell 1'``,
+        etc. Default is None.
+
+    Returns
+    -------
+    corr_matrix : DataFrame, shape (n_cells, n_cells)
+        Symmetric matrix of Pearson r values, indexed by ``cell_labels``.
+        Diagonal is exactly 1. Values are in [-1, 1]; in practice near
+        [0, 1] for smooth unimodal calcium imaging power spectra.
+    p_matrix : DataFrame, shape (n_cells, n_cells)
+        Symmetric matrix of two-tailed p-values corresponding to each r,
+        indexed by ``cell_labels``. Diagonal is 0 by definition
+        (self-correlation is exact). Pass to ``correct_p_values`` for
+        FDR correction before thresholding.
+
+    Notes
+    -----
+    The t-statistic is undefined when ``|r| = 1`` exactly (division by zero
+    in ``sqrt(1 - r^2)``). Diagonal entries are clipped to avoid this:
+    the diagonal of ``r`` is set to ``1 - eps`` before computing ``t``,
+    then the diagonal of ``p_matrix`` is forced back to 0 afterwards.
+
+    The p-values assume that the frequency bins are independent observations.
+    In practice, adjacent FFT bins are correlated (especially after windowing),
+    so the effective degrees of freedom are lower than ``n_freqs - 2`` and
+    p-values should be interpreted with appropriate caution.
+
+    See Also
+    --------
+    compute_spectra    : Produces the ``psds`` array used as input here.
+    correct_p_values   : FDR correction for the returned ``p_matrix``.
+    numpy.corrcoef     : Underlying function for the correlation computation.
+
+    Examples
+    --------
+    >>> dominant_freqs, freq_axis, psds = compute_spectra(filtered_sorted, sampling_rate)
+    >>> corr_matrix, p_matrix = compute_spectral_correlation(psds, cell_labels=filtered_sorted.columns)
+    >>> corr_matrix_fdr, corr_vector = correct_p_values(p_matrix.to_numpy(), cell_labels=filtered_sorted.columns)
+    """
+    n_cells, n_freqs = psds.shape
+
+    if cell_labels is None:
+        cell_labels = [f"Cell {i}" for i in range(n_cells)]
+
+    # Pearson r matrix — operates on rows, shape (n_cells, n_freqs) is correct
+    r = np.corrcoef(psds)
+
+    # Derive p-values from the t-distribution.
+    # Clip diagonal to avoid division by zero at r = 1 exactly.
+    r_clipped = r.copy()
+    np.fill_diagonal(r_clipped, 1 - 1e-10)
+    t_stat = r_clipped * np.sqrt((n_freqs - 2) / (1 - r_clipped ** 2))
+    p      = 2 * t_dist.sf(np.abs(t_stat), df=n_freqs - 2)
+
+    # Restore diagonal: self-correlation is exact, p = 0 by definition
+    np.fill_diagonal(p, 0.0)
+
+    corr_matrix = pd.DataFrame(r, index=cell_labels, columns=cell_labels)
+    p_matrix    = pd.DataFrame(p, index=cell_labels, columns=cell_labels)
+
+    return corr_matrix, p_matrix
+
+def compute_spectral_jsd(psds, cell_labels=None):
+    """
+    Compute pairwise Jensen-Shannon Divergence (JSD) between power spectra.
+
+    Each power spectrum is normalised to a probability distribution over
+    frequencies before comparison, so only spectral *shape* is compared —
+    cells with identical profiles but different overall power levels score 0.
+    High-power bins (the oscillatory peaks) contribute more to the divergence
+    than the flat noise floor, directly addressing the noise-dominance problem
+    of plain Pearson correlation on raw PSDs.
+
+    The Jensen-Shannon Divergence between two distributions P and Q is::
+
+        JSD(P || Q) = 0.5 * KL(P || M) + 0.5 * KL(Q || M),  M = (P + Q) / 2
+
+    where KL is the Kullback-Leibler divergence. JSD is symmetric and bounded
+    in [0, log(2)]. ``scipy.spatial.distance.jensenshannon`` returns the
+    square root, which is a proper metric in [0, 1].
+
+    Parameters
+    ----------
+    psds : ndarray, shape (n_cells, n_freqs)
+        Power spectra, one row per cell. Typically the third return value
+        of ``compute_spectra``. Row order must match the clustering order
+        of the PLV matrix for cross-matrix consistency. Values must be
+        non-negative (satisfied by construction as squared FFT magnitudes).
+    cell_labels : array-like of str or None, optional
+        Labels for each cell, used as row and column names in the output
+        DataFrames. If None, cells are labelled ``'Cell 0'``, ``'Cell 1'``,
+        etc. Default is None.
+
+    Returns
+    -------
+    jsd_matrix : DataFrame, shape (n_cells, n_cells)
+        Symmetric matrix of sqrt(JSD) dissimilarity values, indexed by
+        ``cell_labels``. Values in [0, 1]: 0 means identical spectral
+        shapes, 1 means maximally different. Diagonal is exactly 0.
+    jsd_similarity_matrix : DataFrame, shape (n_cells, n_cells)
+        ``1 - jsd_matrix``, provided for direct visual and numerical
+        comparison with PLV and spectral Pearson r matrices, both of which
+        are similarity measures. Diagonal is exactly 1.
+
+    Notes
+    -----
+    Frequency bins with zero power in both spectra of a pair are handled
+    gracefully by ``scipy.spatial.distance.jensenshannon`` (the KL term
+    contributes 0 there). Rows that sum to zero (flat-zero spectra) are
+    detected and raise a ValueError before any computation.
+
+    Unlike Pearson r, JSD has no associated parametric p-value. To assess
+    significance, pass ``jsd_similarity_matrix`` to a permutation test or
+    use it descriptively alongside the PLV significance results.
+
+    See Also
+    --------
+    compute_spectra              : Produces the ``psds`` array used as input.
+    compute_spectral_correlation : Pearson r alternative for spectral similarity.
+    scipy.spatial.distance.jensenshannon : Underlying implementation.
+
+    Examples
+    --------
+    >>> dominant_freqs, freq_axis, psds = compute_spectra(filtered_sorted, sampling_rate)
+    >>> jsd_matrix, jsd_sim_matrix = compute_spectral_jsd(psds, cell_labels=filtered_sorted.columns)
+    >>> # Compare with PLV
+    >>> scatter: plt.scatter(PLV_vals_vector.values, jsd_sim_vector.values)
+    """
+    n_cells = psds.shape[0]
+
+    if cell_labels is None:
+        cell_labels = [f"Cell {i}" for i in range(n_cells)]
+
+    # Guard against zero-sum rows — jensenshannon would produce NaN silently
+    row_sums = psds.sum(axis=1)
+    if np.any(row_sums == 0):
+        bad = np.where(row_sums == 0)[0]
+        raise ValueError(
+            f"Cells at indices {list(bad)} have a flat-zero power spectrum. "
+            "Check bandpass filtering and interval selection."
+        )
+
+    # Normalise each row to a probability distribution over frequencies
+    psds_norm = psds / row_sums[:, np.newaxis]
+
+    # Compute upper triangle, fill both sides — jensenshannon is symmetric
+    jsd = np.zeros((n_cells, n_cells))
+    for i in range(n_cells):
+        for j in range(i + 1, n_cells):
+            d = jensenshannon(psds_norm[i], psds_norm[j])
+            jsd[i, j] = jsd[j, i] = d  # already sqrt(JSD) ∈ [0, 1]
+
+    # Diagonal is 0 by definition — jensenshannon(x, x) = 0
+    jsd_matrix            = pd.DataFrame(jsd,       index=cell_labels, columns=cell_labels)
+    jsd_similarity_matrix = pd.DataFrame(1 - jsd,   index=cell_labels, columns=cell_labels)
+
+    return jsd_matrix, jsd_similarity_matrix
